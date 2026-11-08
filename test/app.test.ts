@@ -85,13 +85,17 @@ describe("hook", () => {
 });
 
 describe("health", () => {
-  test("is 200 with the sha while the database answers, 503 when it does not", async () => {
+  test("health stays 200 when the database is down (it must not block other apps' deploys); ready turns 503", async () => {
     const h = harness();
     const ok = await h.app(new Request("http://x/ebook-api/health"));
     expect(ok.status).toBe(200);
     expect(await ok.json()).toMatchObject({ ok: true, sha: "abc", env: "staging" });
+    expect((await h.app(new Request("http://x/ebook-api/ready"))).status).toBe(200);
     h.store.healthy = false;
-    expect((await h.app(new Request("http://x/ebook-api/health"))).status).toBe(503);
+    const down = await h.app(new Request("http://x/ebook-api/health"));
+    expect(down.status).toBe(200);
+    expect(await down.json()).toMatchObject({ ok: false, db: "down" });
+    expect((await h.app(new Request("http://x/ebook-api/ready"))).status).toBe(503);
   });
 
   test("anything else is 404", async () => {

@@ -67,9 +67,13 @@ export function createApp(deps: Deps): (req: Request) => Promise<Response> {
 
   return async (req) => {
     const url = new URL(req.url);
-    if (req.method === "GET" && url.pathname === "/ebook-api/health") {
+    // health = the process serves (Docker's healthcheck). It must not depend on the database: deploy.sh waits for
+    // every running container, so a database outage here would roll back an unrelated fe or bazi deploy.
+    // ready = the database answers too (checked by the ebook follower after its own deploy, and by ops tools).
+    if (req.method === "GET" && (url.pathname === "/ebook-api/health" || url.pathname === "/ebook-api/ready")) {
       const db = await deps.store.ping(1000);
-      return json({ ok: db, db: db ? "ok" : "down", env: deps.config.env, sha: deps.config.gitSha }, db ? 200 : 503);
+      const body = { ok: db, db: db ? "ok" : "down", env: deps.config.env, sha: deps.config.gitSha };
+      return json(body, url.pathname.endsWith("/ready") && !db ? 503 : 200);
     }
     if (req.method === "POST" && url.pathname === "/ebook-api/manychat/hook") {
       if (!secretMatches(req.headers.get("x-ebook-hook-secret"), deps.config.hookSecret)) {

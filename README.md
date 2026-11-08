@@ -17,7 +17,8 @@
 
 | Endpoint | ใช้ทำอะไร |
 |---|---|
-| `GET /ebook-api/health` | `200` เมื่อฐานข้อมูลตอบ, `503` เมื่อไม่ตอบ พร้อม `sha` และ `env` |
+| `GET /ebook-api/health` | `200` เมื่อแอปทำงาน (ไม่ขึ้นกับฐานข้อมูล เพื่อไม่ให้แอปนี้ทำ deploy ของ fe/bazi ล้ม) พร้อม `db`, `sha`, `env` |
+| `GET /ebook-api/ready` | `200` เมื่อฐานข้อมูลตอบ, `503` เมื่อไม่ตอบ |
 | `POST /ebook-api/manychat/hook` | External Request จาก ManyChat |
 
 ## สัญญากับ ManyChat (External Request)
