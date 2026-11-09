@@ -58,3 +58,9 @@ bunx tsc --noEmit
 `migrations/` เป็นแบบเพิ่มอย่างเดียว รันซ้ำได้ และรันด้วยมือ:
 - **staging:** `pgstaging` ตาม runbook 05 ของ mumate-infra
 - **production:** รันเมื่อเจ้าของสั่ง ผ่าน `bin/prod-sql.sh` และต้องรันก่อน release ที่ต้องใช้ migration นั้น
+- **role ของแอปบน production:** แอป login เป็น `ebook_app` ซึ่ง mumate-infra `bin/db-role.sh` สร้างแบบไม่มีสิทธิ์อะไรเลย
+  สิทธิ์ทั้งหมดอยู่ใน `0003_ebook_app_grants.sql`: อ่านและเขียนได้แค่ 3 ตารางของแอปนี้ ลบไม่ได้ สร้างตารางไม่ได้
+  ไม่เห็นตารางสมาชิกหรือการจ่ายเงินของ MuMate · staging ไม่มี role นี้ 0003 จึงไม่ทำอะไร
+  ลำดับ: 0001 → 0002 → `bin/db-role.sh ebook_app env/ebook.env EBOOK_DATABASE_URL --commit` → 0003
+- **ทดสอบกับ Postgres จริง:** `test/pg.test.ts` (ดูหัวไฟล์) ครอบ 0003 ด้วย: login เป็น `ebook_app` แล้วเขียนตารางของแอปได้
+  แต่อ่านตารางอื่น ลบ และสร้างตารางไม่ได้
