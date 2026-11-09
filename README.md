@@ -2,8 +2,8 @@
 
 หลังบ้านของการขาย E-Book ผ่าน ManyChat ทำงานแทนส่วนที่แอดมินทำเอง ตามแผน CIEL workstream `mumate-manychat-ebook-001`
 
-- **slice 1 (ตอนนี้):** รับ External Request จาก flow ทดสอบใน ManyChat บันทึก event และตอบกลับเฉพาะ tester
-- **slice 2:** ตรวจสลิปด้วย Slip2Go และส่งลิงก์ PDF กับโค้ดแอป
+- **slice 1:** รับ External Request จาก flow ทดสอบใน ManyChat บันทึก event และตอบกลับเฉพาะ tester
+- **slice 2 (ตอนนี้):** ตรวจสลิปด้วย Slip2Go แล้วส่ง flow ส่งของ (ลิงก์ E-Book, คูปองแอป, รูปวิธีกรอก) แบบเดียวกับที่ทีมส่งเอง
 - **slice 3:** ข้อมูลว่าใครจ่ายและใครไม่จ่าย
 - **slice 4:** ปล่อยจริงบน production
 
@@ -20,6 +20,7 @@
 | `GET /ebook-api/health` | `200` เมื่อแอปทำงาน (ไม่ขึ้นกับฐานข้อมูล เพื่อไม่ให้แอปนี้ทำ deploy ของ fe/bazi ล้ม) พร้อม `db`, `sha`, `env` |
 | `GET /ebook-api/ready` | `200` เมื่อฐานข้อมูลตอบ, `503` เมื่อไม่ตอบ |
 | `POST /ebook-api/manychat/hook` | External Request จาก ManyChat |
+| `POST /ebook-api/manychat/slip` | รูปสลิปจาก flow ทดสอบ `{subscriber_id, image_url}` header เดียวกับ hook |
 
 ## สัญญากับ ManyChat (External Request)
 
@@ -27,6 +28,15 @@
 - **body:** `{"subscriber_id": "{{user_id}}", "step": "<a-z0-9_>"}`
 - **การตอบ:** แอปตอบทันทีด้วย dynamic reply ว่าง ๆ แล้วค่อยทำงานต่อ
   เพราะ ManyChat รอได้ราว 10 วินาที ข้อความตอบลูกค้าส่งตามไปทาง `sendContent`
+
+## ตรวจสลิป (slice 2)
+
+- **ผ่านเมื่อ Slip2Go ตอบ `200200` เท่านั้น** (`200000` ไม่นับ) และ `transRef` ยังไม่เคยจ่ายออเดอร์อื่น
+- **ผ่าน:** ติด tag `bot_paid` แล้วส่ง flow `EBOOK_FLOW_DELIVER` ครั้งเดียวต่อออเดอร์
+- **ไม่ผ่าน / รอแอดมิน:** ใส่เหตุผลใน field `bot_reason` ติด `bot_rejected` หรือ `bot_admin` แล้วส่ง flow `EBOOK_FLOW_NOTICE`
+- **ลองใหม่:** ธนาคารขัดข้อง เรียกถี่เกิน หรือ Slip2Go ล่ม ลองใหม่ทุก 1, 2, 4, 8 นาที ครั้งที่ 5 ส่งให้แอดมิน
+- **คำสั่งแอดมิน** (ผ่าน `bin/ebook.sh` ของ mumate-infra): `bun run src/cli.ts orders|pending|resend|mark-paid`
+- tag และ field ข้างบนต้องสร้างไว้ใน ManyChat ก่อน
 
 ## ด่านกันพลาด
 
@@ -39,6 +49,7 @@
 ```bash
 bun install
 bun test test/
+# store กับ Postgres จริง (ฐานข้อมูลทิ้งได้ในเครื่องเท่านั้น): ดูหัวไฟล์ test/pg.test.ts
 bunx tsc --noEmit
 ```
 

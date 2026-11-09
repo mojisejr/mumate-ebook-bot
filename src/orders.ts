@@ -1,0 +1,188 @@
+// What happens to a slip (CIEL mumate-manychat-ebook-001 slice 2, plan revision 0.4):
+//
+//   slip image → order (one per contact+image) → Slip2Go → pass:   claim transRef → paid → tag bot_paid + delivery flow
+//                                                        → reject: bot_reason + tag bot_rejected + notice flow (admin told)
+//                                                        → retry:  back off and try again, then hand to the admin
+//                                                        → admin:  bot_reason + tag bot_admin + notice flow
+//
+// The delivery flow in ManyChat holds the same message the team sends by hand (E-Book link, the app coupon, the how-to
+// image), so the team edits that text in ManyChat without touching this app. Delivery is claimed with one conditional
+// UPDATE, so a repeated request, a retry tick and an admin's resend can never send it twice.
+
+import { createHash } from "node:crypto";
+import type { SlipConfig } from "./config.ts";
+import type { ManyChat } from "./manychat.ts";
+import type { Order, OrderStore } from "./orders-store.ts";
+import type { RejectReason, Slip2Go, Verdict } from "./slip2go.ts";
+
+export const MAX_ATTEMPTS = 5;
+export const TAG_PAID = "bot_paid";
+export const TAG_REJECTED = "bot_rejected";
+export const TAG_ADMIN = "bot_admin";
+export const FIELD_REASON = "bot_reason";
+
+const ADMIN_TAIL = "แอดมินได้รับแจ้งแล้ว จะช่วยดูให้ในแชทนี้ครับ 🙏";
+
+export function reasonText(reason: RejectReason | "admin", price: number): string {
+  switch (reason) {
+    case "receiver":
+      return `สลิปนี้โอนเข้าบัญชีอื่น ไม่ใช่บัญชีบริษัท มูเทค เดสตินี่ (กสิกรไทย) ครับ ${ADMIN_TAIL}`;
+    case "amount":
+      return `ยอดในสลิปไม่ตรงกับราคา ${price} บาทครับ ${ADMIN_TAIL}`;
+    case "not_found":
+      return `ระบบยังหาสลิปนี้ในธนาคารไม่เจอครับ บางธนาคารส่งข้อมูลช้า ${ADMIN_TAIL}`;
+    case "fraud":
+      return `สลิปนี้ตรวจกับธนาคารไม่ผ่านครับ ${ADMIN_TAIL}`;
+    case "duplicate":
+      return `สลิปนี้เคยใช้สั่งซื้อไปแล้วครับ ${ADMIN_TAIL}`;
+    case "not_a_slip":
+      return `รูปนี้อ่านเป็นสลิปไม่ได้ครับ ลองส่งรูปสลิปที่เห็น QR ชัด ๆ อีกครั้งได้เลย หรือรอแอดมินช่วยดู 🙏`;
+    case "admin":
+      return `ได้รับสลิปแล้วครับ แอดมินจะตรวจและส่ง E-Book ให้ในแชทนี้ 🙏`;
+  }
+}
+
+export function imageHash(subscriberId: string, imageUrl: string): string {
+  return createHash("sha256").update(`${subscriberId}\n${imageUrl}`).digest("hex");
+}
+
+export function retryDelayMs(attempt: number): number {
+  // 1, 2, 4, 8 minutes after attempts 1-4; the fifth failure goes to the admin
+  return 60_000 * 2 ** Math.max(0, attempt - 1);
+}
+
+export interface ProcessorDeps {
+  env: string;
+  slip: SlipConfig;
+  slip2go: Slip2Go;
+  manychat: ManyChat;
+  orders: OrderStore;
+  now?: () => Date;
+  log?: (entry: Record<string, unknown>) => void;
+}
+
+export type AdminResult = { ok: true; detail: string } | { ok: false; detail: string };
+
+export function createProcessor(d: ProcessorDeps) {
+  const now = d.now ?? (() => new Date());
+  const log = d.log ?? ((entry) => console.log(JSON.stringify(entry)));
+  const SYSTEM = "bot";
+
+  async function notice(order: Order, kind: "rejected" | "admin", text: string): Promise<void> {
+    const tag = kind === "rejected" ? TAG_REJECTED : TAG_ADMIN;
+    const steps = [
+      await d.manychat.setField(order.subscriberId, FIELD_REASON, text),
+      await d.manychat.addTag(order.subscriberId, tag),
+      await d.manychat.sendFlow(order.subscriberId, d.slip.flowNotice),
+    ];
+    const failed = steps.filter((s) => !s.ok).map((s) => (s.ok ? "" : s.detail));
+    await d.orders.log({ orderId: order.id, action: failed.length ? "notice_failed" : "notice_sent", by: SYSTEM,
+      detail: { kind, ...(failed.length ? { errors: failed } : {}) } });
+    if (failed.length) log({ msg: "notice_failed", order: order.id, env: d.env, errors: failed });
+  }
+
+  async function deliver(orderId: number, by: string): Promise<AdminResult> {
+    if (!(await d.orders.claimDelivery(orderId))) return { ok: false, detail: "not paid, or already delivered" };
+    const order = (await d.orders.get(orderId))!;
+    const tag = await d.manychat.addTag(order.subscriberId, TAG_PAID);
+    if (!tag.ok) log({ msg: "tag_failed", order: orderId, env: d.env, error: tag.detail });
+    const sent = await d.manychat.sendFlow(order.subscriberId, d.slip.flowDeliver);
+    if (!sent.ok) {
+      await d.orders.deliveryFailed(orderId, sent.detail);
+      await d.orders.log({ orderId, action: "delivery_failed", by, detail: { error: sent.detail } });
+      log({ msg: "delivery_failed", order: orderId, env: d.env, error: sent.detail });
+      return { ok: false, detail: sent.detail };
+    }
+    await d.orders.log({ orderId, action: "delivered", by });
+    log({ msg: "delivered", order: orderId, env: d.env });
+    return { ok: true, detail: "delivered" };
+  }
+
+  async function apply(order: Order, v: Verdict): Promise<void> {
+    await d.orders.log({ orderId: order.id, action: "checked", by: SYSTEM, detail: { kind: v.kind, code: v.code } });
+    if (v.kind === "pass") {
+      if (!v.slip.transRef) {
+        await d.orders.setResult(order.id, { status: "admin", slipCode: v.code, reason: "pass without transRef" });
+        return notice(order, "admin", reasonText("admin", d.slip.price));
+      }
+      if (!(await d.orders.claimTransRef(order.id, v.slip.transRef))) {
+        await d.orders.setResult(order.id, { status: "rejected", slipCode: v.code, reason: "duplicate (our table)" });
+        return notice(order, "rejected", reasonText("duplicate", d.slip.price));
+      }
+      await d.orders.setResult(order.id, {
+        status: "paid", slipCode: v.code, amount: v.slip.amount, slipAt: v.slip.dateTime, senderName: v.slip.senderName,
+      });
+      await deliver(order.id, SYSTEM);
+      return;
+    }
+    if (v.kind === "reject") {
+      await d.orders.setResult(order.id, { status: "rejected", slipCode: v.code, reason: v.reason, amount: v.slip?.amount ?? null });
+      return notice(order, "rejected", reasonText(v.reason, d.slip.price));
+    }
+    if (v.kind === "retry") {
+      const attempts = order.attempts + 1;
+      if (attempts >= MAX_ATTEMPTS) {
+        await d.orders.setResult(order.id, { status: "admin", slipCode: v.code, reason: `gave up after ${attempts}: ${v.detail}`, attempts });
+        log({ msg: "alert", what: "slip check kept failing", order: order.id, env: d.env, code: v.code });
+        return notice(order, "admin", reasonText("admin", d.slip.price));
+      }
+      await d.orders.setResult(order.id, {
+        status: "retry", slipCode: v.code, reason: v.detail, attempts,
+        nextAttemptAt: new Date(now().getTime() + retryDelayMs(attempts)),
+      });
+      return;
+    }
+    await d.orders.setResult(order.id, { status: "admin", slipCode: v.code, reason: v.detail });
+    // 401xxx: token, credit, package, key or IP. Every following slip fails the same way until the team acts.
+    if (v.alert) log({ msg: "alert", what: "Slip2Go refused our account", order: order.id, env: d.env, code: v.code });
+    return notice(order, "admin", reasonText("admin", d.slip.price));
+  }
+
+  async function check(order: Order): Promise<void> {
+    const verdict = await d.slip2go.verifyImageLink(order.imageUrl);
+    await apply(order, verdict);
+  }
+
+  return {
+    async handleSlip(subscriberId: string, imageUrl: string): Promise<{ order: Order; created: boolean }> {
+      const opened = await d.orders.open({ env: d.env, subscriberId, imageHash: imageHash(subscriberId, imageUrl), imageUrl });
+      if (!opened.created) {
+        await d.orders.log({ orderId: opened.order.id, action: "repeat_request", by: SYSTEM });
+        return opened;
+      }
+      await d.orders.log({ orderId: opened.order.id, action: "received", by: SYSTEM });
+      await check(opened.order);
+      return opened;
+    },
+
+    async retryDue(): Promise<number> {
+      const due = await d.orders.dueRetries(d.env, now());
+      for (const order of due) await check(order);
+      return due.length;
+    },
+
+    // An admin confirmed the money by hand (for example a slip Slip2Go could not find). Records who and why, then delivers.
+    async markPaid(orderId: number, by: string, reason: string, dryRun: boolean): Promise<AdminResult> {
+      const order = await d.orders.get(orderId);
+      if (!order) return { ok: false, detail: `no order ${orderId}` };
+      if (order.status === "paid") return { ok: false, detail: "already paid; use resend if the customer has nothing" };
+      if (dryRun) return { ok: true, detail: `would mark order ${orderId} (${order.status}) paid and deliver` };
+      await d.orders.setResult(orderId, { status: "paid", slipCode: order.slipCode, reason: `marked paid: ${reason}` });
+      await d.orders.log({ orderId, action: "mark_paid", by, reason });
+      return deliver(orderId, by);
+    },
+
+    // Send the delivery flow again for a paid order (the first send failed, or the customer lost the message).
+    async resend(orderId: number, by: string, reason: string, dryRun: boolean): Promise<AdminResult> {
+      const order = await d.orders.get(orderId);
+      if (!order) return { ok: false, detail: `no order ${orderId}` };
+      if (order.status !== "paid") return { ok: false, detail: `order is ${order.status}, not paid` };
+      if (dryRun) return { ok: true, detail: `would send the delivery flow again for order ${orderId}` };
+      await d.orders.log({ orderId, action: "resend", by, reason });
+      if (order.deliveredAt) await d.orders.deliveryFailed(orderId, `resend requested: ${reason}`);
+      return deliver(orderId, by);
+    },
+  };
+}
+
+export type Processor = ReturnType<typeof createProcessor>;
