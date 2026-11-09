@@ -19,9 +19,12 @@ export interface Store {
   close(): Promise<void>;
 }
 
-export function createPgStore(url: string): Store {
+export function openDatabase(url: string): SQL {
   // A small pool: this app makes a handful of writes per chat message.
-  const sql = new SQL({ url, max: 3, idleTimeout: 30, connectionTimeout: 5 });
+  return new SQL({ url, max: 3, idleTimeout: 30, connectionTimeout: 5 });
+}
+
+export function createPgStore(sql: SQL): Store {
   return {
     async record(e) {
       await sql`

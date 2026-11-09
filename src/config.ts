@@ -15,6 +15,54 @@ export interface Config {
   allowlist: ReadonlySet<string>;
   open: boolean;
   gitSha: string;
+  // Slice 2. Absent until every value is set: the app still answers the slice 1 hook, and the slip endpoint says
+  // "not configured" instead of guessing a price or a receiver.
+  slip: SlipConfig | null;
+}
+
+export interface SlipConfig {
+  apiUrl: string;
+  secretKey: string;
+  receiverAccountType: string;
+  receiverAccountNumber: string;
+  price: number;
+  // ManyChat flows the app sends: delivery (E-Book link, app coupon, how-to image) and notice ({{bot_reason}} + admin)
+  flowDeliver: string;
+  flowNotice: string;
+}
+
+const SLIP_KEYS = [
+  "SLIP2GO_SECRET_KEY", "EBOOK_RECEIVER_ACCOUNT_TYPE", "EBOOK_RECEIVER_ACCOUNT_NUMBER", "EBOOK_PRICE",
+  "EBOOK_FLOW_DELIVER", "EBOOK_FLOW_NOTICE",
+] as const;
+
+function loadSlip(env: Record<string, string | undefined>): SlipConfig | null {
+  const present = SLIP_KEYS.filter((k) => env[k]?.trim());
+  if (present.length === 0) return null;
+  if (present.length < SLIP_KEYS.length) {
+    const missing = SLIP_KEYS.filter((k) => !env[k]?.trim());
+    throw new Error(`slip check is half configured; missing ${missing.join(", ")}`);
+  }
+  const price = Number(env.EBOOK_PRICE);
+  if (!Number.isFinite(price) || price <= 0 || !/^\d+(\.\d{1,2})?$/.test(env.EBOOK_PRICE!.trim())) {
+    throw new Error("EBOOK_PRICE must be a positive amount in baht, like 95 or 1");
+  }
+  const type = env.EBOOK_RECEIVER_ACCOUNT_TYPE!.trim();
+  if (!/^\d{5}$/.test(type)) throw new Error("EBOOK_RECEIVER_ACCOUNT_TYPE must be a five-digit Slip2Go bank code");
+  const number = env.EBOOK_RECEIVER_ACCOUNT_NUMBER!.trim();
+  if (!/^\d{6,15}$/.test(number)) throw new Error("EBOOK_RECEIVER_ACCOUNT_NUMBER must be digits only");
+  for (const k of ["EBOOK_FLOW_DELIVER", "EBOOK_FLOW_NOTICE"] as const) {
+    if (!/^content\d{14}_\d{1,10}$/.test(env[k]!.trim())) throw new Error(`${k} must be a ManyChat flow ns like content20261109120000_123456`);
+  }
+  return {
+    apiUrl: (env.SLIP2GO_API_URL?.trim() || "https://connect.slip2go.com").replace(/\/+$/, ""),
+    secretKey: env.SLIP2GO_SECRET_KEY!.trim(),
+    receiverAccountType: type,
+    receiverAccountNumber: number,
+    price,
+    flowDeliver: env.EBOOK_FLOW_DELIVER!.trim(),
+    flowNotice: env.EBOOK_FLOW_NOTICE!.trim(),
+  };
 }
 
 function required(env: Record<string, string | undefined>, name: string): string {
@@ -44,6 +92,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     ),
     open,
     gitSha: env.GIT_SHA?.trim() || "unknown",
+    slip: loadSlip(env),
   };
 }
 

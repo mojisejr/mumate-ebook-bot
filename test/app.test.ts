@@ -17,6 +17,9 @@ function harness(opts: { open?: boolean; sendOk?: boolean } = {}) {
       sent.push({ id, text });
       return opts.sendOk === false ? { ok: false, detail: "HTTP 400: window closed" } : { ok: true };
     },
+    async sendFlow() { return { ok: true }; },
+    async addTag() { return { ok: true }; },
+    async setField() { return { ok: true }; },
   };
   const pending: Promise<unknown>[] = [];
   const app = createApp({
@@ -138,6 +141,6 @@ describe("manychat client", () => {
       fetch: async () => new Response('{"status":"error","message":"window"}', { status: 400 }) });
     expect(await bad.sendText(TESTER, "hi")).toMatchObject({ ok: false });
     const down = createManyChat({ apiKey: "K", apiBase: "https://mc.test", fetch: async () => { throw new Error("ECONNRESET"); } });
-    expect(await down.sendText(TESTER, "hi")).toEqual({ ok: false, detail: "ECONNRESET" });
+    expect(await down.sendText(TESTER, "hi")).toEqual({ ok: false, detail: "/fb/sending/sendContent ECONNRESET" });
   });
 });
