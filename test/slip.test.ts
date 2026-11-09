@@ -3,7 +3,7 @@ import { createApp, parseSlip } from "../src/app.ts";
 import { parseArgs } from "../src/cli.ts";
 import { loadConfig, type SlipConfig } from "../src/config.ts";
 import type { ManyChat, Sent } from "../src/manychat.ts";
-import { createProcessor, MAX_ATTEMPTS, reasonText } from "../src/orders.ts";
+import { createProcessor, MAX_ATTEMPTS, reasonText, repeatText } from "../src/orders.ts";
 import { createMemoryOrderStore } from "../src/orders-store.ts";
 import { classify, createSlip2Go, type Slip2Go, type Verdict } from "../src/slip2go.ts";
 import { createMemoryStore } from "../src/store.ts";
@@ -92,6 +92,37 @@ describe("slip endpoint", () => {
     expect(h.deliveries()).toBe(1);
     expect(h.slip2go.calls).toBe(1);
     expect(h.orders.logs.map((l) => l.action)).toContain("repeat_request");
+  });
+
+  test("the same slip sent again later is refused with a reason and the admin is told; the paid order stays paid", async () => {
+    let later = 0;
+    const h = harness({ now: () => new Date(Date.now() + later) });
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    later = 2 * 60_000;
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    expect(h.deliveries()).toBe(1);
+    expect(h.slip2go.calls).toBe(1);
+    expect(h.notices()).toBe(1);
+    expect(h.mc.calls).toContain(`field:bot_reason=${reasonText("duplicate", 1)}`);
+    expect(h.orders.orders[0]).toMatchObject({ status: "paid" });
+    expect(h.orders.logs.map((l) => l.action)).toContain("repeat_slip");
+  });
+
+  test("a refused slip sent again later hears the same reason again", async () => {
+    let later = 0;
+    const h = harness({ slip2go: answers("200402"), now: () => new Date(Date.now() + later) });
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    later = 2 * 60_000;
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    expect(h.slip2go.calls).toBe(1);
+    expect(h.notices()).toBe(2);
+    expect(h.mc.calls.filter((c) => c === `field:bot_reason=${reasonText("amount", 1)}`).length).toBe(2);
+  });
+
+  test("repeatText: our-table duplicates and admin orders get their own words", () => {
+    expect(repeatText({ status: "rejected", reason: "duplicate (our table)" }, 1)).toBe(reasonText("duplicate", 1));
+    expect(repeatText({ status: "admin", reason: "x" }, 1)).toBe(reasonText("admin", 1));
+    expect(repeatText({ status: "paid", reason: null }, 1)).toBe(reasonText("duplicate", 1));
   });
 
   test("a slip that already paid, sent again as a new image, is refused by our table even if Slip2Go passed it", async () => {

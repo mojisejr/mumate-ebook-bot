@@ -46,6 +46,20 @@ export function imageHash(subscriberId: string, imageUrl: string): string {
   return createHash("sha256").update(`${subscriberId}\n${imageUrl}`).digest("hex");
 }
 
+export const REPEAT_QUIET_MS = 60_000;
+
+// What a customer hears when they send a slip this contact already sent: the order keeps its status.
+export function repeatText(order: Pick<Order, "status" | "reason">, price: number): string {
+  if (order.status === "rejected" && order.reason && isRejectReason(order.reason)) return reasonText(order.reason, price);
+  if (order.status === "admin") return reasonText("admin", price);
+  return reasonText("duplicate", price);
+}
+
+const REJECT_REASONS = ["receiver", "amount", "not_found", "fraud", "duplicate", "not_a_slip"] as const;
+function isRejectReason(r: string): r is RejectReason {
+  return (REJECT_REASONS as readonly string[]).includes(r);
+}
+
 export function retryDelayMs(attempt: number): number {
   // 1, 2, 4, 8 minutes after attempts 1-4; the fifth failure goes to the admin
   return 60_000 * 2 ** Math.max(0, attempt - 1);
@@ -147,7 +161,12 @@ export function createProcessor(d: ProcessorDeps) {
     async handleSlip(subscriberId: string, imageUrl: string): Promise<{ order: Order; created: boolean }> {
       const opened = await d.orders.open({ env: d.env, subscriberId, imageHash: imageHash(subscriberId, imageUrl), imageUrl });
       if (!opened.created) {
-        await d.orders.log({ orderId: opened.order.id, action: "repeat_request", by: SYSTEM });
+        const o = opened.order;
+        // A ManyChat retry or a double tap arrives within seconds, often while the first check is still running: stay
+        // quiet. Later, the customer sent the same slip again on purpose: answer with a reason and tell the admin.
+        const quiet = o.status === "checking" || o.status === "retry" || now().getTime() - o.createdAt.getTime() < REPEAT_QUIET_MS;
+        await d.orders.log({ orderId: o.id, action: quiet ? "repeat_request" : "repeat_slip", by: SYSTEM });
+        if (!quiet) await notice(o, "rejected", repeatText(o, d.slip.price));
         return opened;
       }
       await d.orders.log({ orderId: opened.order.id, action: "received", by: SYSTEM });
