@@ -5,6 +5,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createPgFunnelStore } from "../src/funnel.ts";
 import { createPgOrderStore } from "../src/orders-store.ts";
 import { createPgStore, openDatabase } from "../src/store.ts";
 
@@ -15,7 +16,7 @@ describe.skipIf(!local)("postgres order store", () => {
   test("migrations apply twice, and every guarded update holds", async () => {
     const sql = openDatabase(url!);
     try {
-      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql"]) {
+      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql", "0004_ebook_funnel_event.sql"]) {
         const text = readFileSync(new URL(`../migrations/${f}`, import.meta.url), "utf8");
         await sql.unsafe(text);
         await sql.unsafe(text); // idempotent
@@ -62,7 +63,7 @@ describe.skipIf(!local)("postgres order store", () => {
       await admin.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ebook_app') THEN CREATE ROLE ebook_app LOGIN NOINHERIT; END IF; END $r$`);
       await admin.unsafe(`ALTER ROLE ebook_app PASSWORD '${pw}'`);
       await admin.unsafe("CREATE TABLE IF NOT EXISTS not_ebook_member (id int)");
-      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql"]) {
+      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql", "0004_ebook_funnel_event.sql"]) {
         await admin.unsafe(readFileSync(new URL(`../migrations/${f}`, import.meta.url), "utf8"));
       }
     } finally {
@@ -77,6 +78,11 @@ describe.skipIf(!local)("postgres order store", () => {
       expect(await orders.claimDelivery(o.order.id)).toBe(true);
       await orders.log({ orderId: o.order.id, action: "test", by: "test" });
       await createPgStore(asApp).record({ env: "development", subscriberId: "1234567890", step: "slip", outcome: "received" });
+      await createPgFunnelStore(asApp).record({ env: "development", subscriberId: "1234567890", step: "reason", value: "want_qr" });
+      const [row] = await asApp`SELECT step, value FROM ebook_funnel_event ORDER BY id DESC LIMIT 1`;
+      expect(row).toMatchObject({ step: "reason", value: "want_qr" });
+      await expect(asApp`INSERT INTO ebook_funnel_event (env, subscriber_id, step) VALUES ('development', '1', 'checkout')`.then(() => "inserted")).rejects.toThrow(/check constraint/);
+      await expect(asApp`DELETE FROM ebook_funnel_event`.then(() => "deleted")).rejects.toThrow(/permission denied/);
       await expect(asApp`SELECT * FROM not_ebook_member`.then(() => "read")).rejects.toThrow(/permission denied/);
       await expect(asApp`DELETE FROM ebook_order WHERE id = ${o.order.id}`.then(() => "deleted")).rejects.toThrow(/permission denied/);
       await expect(asApp`CREATE TABLE ebook_app_made (id int)`.then(() => "created")).rejects.toThrow(/permission denied/);
