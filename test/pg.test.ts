@@ -15,7 +15,7 @@ describe.skipIf(!local)("postgres order store", () => {
   test("migrations apply twice, and every guarded update holds", async () => {
     const sql = openDatabase(url!);
     try {
-      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql"]) {
+      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql"]) {
         const text = readFileSync(new URL(`../migrations/${f}`, import.meta.url), "utf8");
         await sql.unsafe(text);
         await sql.unsafe(text); // idempotent
@@ -52,6 +52,37 @@ describe.skipIf(!local)("postgres order store", () => {
       await createPgStore(sql).record({ env, subscriberId: "1234567890", step: "slip", outcome: "received" });
     } finally {
       await sql.close();
+    }
+  });
+
+  test("0003: ebook_app reads and writes only this app's tables, and cannot delete", async () => {
+    const admin = openDatabase(url!);
+    const pw = `t${Date.now().toString(16)}`;
+    try {
+      await admin.unsafe(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ebook_app') THEN CREATE ROLE ebook_app LOGIN NOINHERIT; END IF; END $r$`);
+      await admin.unsafe(`ALTER ROLE ebook_app PASSWORD '${pw}'`);
+      await admin.unsafe("CREATE TABLE IF NOT EXISTS not_ebook_member (id int)");
+      for (const f of ["0001_ebook_bot_event.sql", "0002_ebook_order.sql", "0003_ebook_app_grants.sql"]) {
+        await admin.unsafe(readFileSync(new URL(`../migrations/${f}`, import.meta.url), "utf8"));
+      }
+    } finally {
+      await admin.close();
+    }
+    const asApp = openDatabase(url!.replace(/\/\/[^@]+@/, `//ebook_app:${pw}@`));
+    try {
+      const orders = createPgOrderStore(asApp);
+      const tag = Date.now().toString(16).padEnd(64, "0").slice(0, 64);
+      const o = await orders.open({ env: "development", subscriberId: "1234567890", imageHash: tag, imageUrl: "https://x/3" });
+      await orders.setResult(o.order.id, { status: "paid", slipCode: "200200", amount: 1 });
+      expect(await orders.claimDelivery(o.order.id)).toBe(true);
+      await orders.log({ orderId: o.order.id, action: "test", by: "test" });
+      await createPgStore(asApp).record({ env: "development", subscriberId: "1234567890", step: "slip", outcome: "received" });
+      await expect(asApp`SELECT * FROM not_ebook_member`.then(() => "read")).rejects.toThrow(/permission denied/);
+      await expect(asApp`DELETE FROM ebook_order WHERE id = ${o.order.id}`.then(() => "deleted")).rejects.toThrow(/permission denied/);
+      await expect(asApp`CREATE TABLE ebook_app_made (id int)`.then(() => "created")).rejects.toThrow(/permission denied/);
+
+    } finally {
+      await asApp.close();
     }
   });
 });
