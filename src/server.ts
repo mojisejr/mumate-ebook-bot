@@ -1,4 +1,5 @@
 import { createApp } from "./app.ts";
+import { createPgFunnelStore } from "./funnel.ts";
 import { loadConfig } from "./config.ts";
 import { createManyChat } from "./manychat.ts";
 import { createProcessor } from "./orders.ts";
@@ -13,7 +14,7 @@ const manychat = createManyChat({ apiKey: config.manychatApiKey, apiBase: config
 const processor = config.slip
   ? createProcessor({ env: config.env, slip: config.slip, slip2go: createSlip2Go(config.slip), manychat, orders: createPgOrderStore(sql) })
   : null;
-const handler = createApp({ config, store, manychat, processor });
+const handler = createApp({ config, store, manychat, processor, funnel: createPgFunnelStore(sql) });
 
 const server = Bun.serve({ port: config.port, fetch: handler });
 console.log(JSON.stringify({ msg: "listening", port: server.port, env: config.env, sha: config.gitSha,

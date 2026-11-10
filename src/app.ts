@@ -5,10 +5,13 @@
 //                                   ManyChat waits only about 10 s, and a late answer leaves the flow with empty fields.
 //   POST /ebook-api/manychat/slip   The slip image of the [TEST] flow (slice 2): {subscriber_id, image_url}. Same secret,
 //                                   same answer-at-once rule; the check and the delivery run in the background.
+//   POST /ebook-api/manychat/event  A funnel step of the live flow (slice 4): {subscriber_id, step, value?}, names from
+//                                   src/funnel.ts. Recorded for every contact (data, never a message), so no allowlist.
 
 import { timingSafeEqual } from "node:crypto";
 import { mayMessage, type Config } from "./config.ts";
 import type { ManyChat } from "./manychat.ts";
+import { parseFunnel, type FunnelStore } from "./funnel.ts";
 import type { Processor } from "./orders.ts";
 import type { Store } from "./store.ts";
 
@@ -18,6 +21,8 @@ export interface Deps {
   manychat: ManyChat;
   // null until every slip setting is configured (config.slip): the slip endpoint then answers 503 and records why
   processor?: Processor | null;
+  // funnel events (slice 4); absent = the event endpoint answers 503
+  funnel?: FunnelStore | null;
   // Background work is handed here so tests can wait for it; production just lets it run.
   defer?: (work: Promise<unknown>) => void;
   log?: (entry: Record<string, unknown>) => void;
@@ -144,6 +149,18 @@ export function createApp(deps: Deps): (req: Request) => Promise<Response> {
       const slip = parseSlip(read.body);
       if (!slip) return json({ error: "need subscriber_id (digits) and image_url (https)" }, 400);
       defer(handleSlip(slip.subscriberId, slip.imageUrl));
+      return json(EMPTY_DYNAMIC_REPLY);
+    }
+    if (req.method === "POST" && url.pathname === "/ebook-api/manychat/event") {
+      const read = await readAuthorized(req);
+      if (read instanceof Response) return read;
+      const ev = parseFunnel(read.body);
+      if (!ev) return json({ error: "need subscriber_id (digits), a known step and, where it has one, a known value" }, 400);
+      const funnel = deps.funnel;
+      if (!funnel) return json({ error: "funnel not configured" }, 503);
+      const env = deps.config.env;
+      defer(funnel.record({ env, ...ev }).catch((error) =>
+        log({ msg: "funnel_error", env, step: ev.step, error: error instanceof Error ? error.message : String(error) })));
       return json(EMPTY_DYNAMIC_REPLY);
     }
     return json({ error: "not found" }, 404);

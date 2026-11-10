@@ -61,6 +61,7 @@ bunx tsc --noEmit
 - **role ของแอปบน production:** แอป login เป็น `ebook_app` ซึ่ง mumate-infra `bin/db-role.sh` สร้างแบบไม่มีสิทธิ์อะไรเลย
   สิทธิ์ทั้งหมดอยู่ใน `0003_ebook_app_grants.sql`: อ่านและเขียนได้แค่ 3 ตารางของแอปนี้ ลบไม่ได้ สร้างตารางไม่ได้
   ไม่เห็นตารางสมาชิกหรือการจ่ายเงินของ MuMate · staging ไม่มี role นี้ 0003 จึงไม่ทำอะไร
-  ลำดับ: 0001 → 0002 → `bin/db-role.sh ebook_app env/ebook.env EBOOK_DATABASE_URL --commit` → 0003
+  ลำดับ: 0001 → 0002 → `bin/db-role.sh ebook_app env/ebook.env EBOOK_DATABASE_URL --commit` → 0003 → 0004
+- **0004 (slice 4):** ตาราง `ebook_funnel_event` เก็บขั้นของ funnel และเหตุผลใน FU1 ไม่มีข้อความแชท รายชื่อขั้นอยู่ใน `src/funnel.ts`
 - **ทดสอบกับ Postgres จริง:** `test/pg.test.ts` (ดูหัวไฟล์) ครอบ 0003 ด้วย: login เป็น `ebook_app` แล้วเขียนตารางของแอปได้
   แต่อ่านตารางอื่น ลบ และสร้างตารางไม่ได้
