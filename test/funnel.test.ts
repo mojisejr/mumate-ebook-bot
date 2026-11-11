@@ -47,11 +47,11 @@ describe("funnel event endpoint", () => {
     expect(h.sent).toEqual([]);
   });
 
-  test("steps with a value list keep the value; the FU1 reasons and the entry source are accepted", async () => {
+  test("steps with a value list keep the value; entry takes no value (an empty one from ManyChat is none)", async () => {
     const h = harness();
     await h.send({ subscriber_id: CUSTOMER, step: "reason", value: "want_qr" });
-    await h.send({ subscriber_id: Number(CUSTOMER), step: "entry", value: "comment" });
-    expect(h.funnel.events.map((e) => [e.step, e.value])).toEqual([["reason", "want_qr"], ["entry", "comment"]]);
+    await h.send({ subscriber_id: Number(CUSTOMER), step: "entry", value: "" });
+    expect(h.funnel.events.map((e) => [e.step, e.value])).toEqual([["reason", "want_qr"], ["entry", null]]);
   });
 
   test.each([

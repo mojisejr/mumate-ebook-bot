@@ -9,7 +9,7 @@
 import type { SQL } from "bun";
 
 export const FUNNEL_STEPS = {
-  entry: ["comment", "keyword"], //            1 ข้อความแรก: which trigger brought them in
+  entry: [], //                                1 ข้อความแรก (ManyChat cannot tell the comment trigger from the keyword one here)
   sample: [], //                               2a ตัวอย่าง+รีวิว
   faq: ["menu", "beginner", "file", "app", "delivery", "admin"], // FAQ เมนูคำถาม and FAQ1-FAQ5
   buy: [], //                                  2b สั่งซื้อ + วิธีโอน (the account number was shown)
