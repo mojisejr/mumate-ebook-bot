@@ -43,6 +43,13 @@ export interface OrderStore {
   // true exactly once per order: the caller that wins sends the delivery flow
   claimDelivery(id: number): Promise<boolean>;
   deliveryFailed(id: number, error: string): Promise<void>;
+  // when the next automatic delivery try is due (null = no more tries)
+  scheduleDelivery(id: number, at: Date | null): Promise<void>;
+  // paid, not delivered, and a delivery try is due
+  dueDeliveries(env: string, now: Date): Promise<Order[]>;
+  // an admin sent the E-Book by hand: true when this closed a paid, undelivered order
+  markDelivered(id: number): Promise<boolean>;
+  countLog(orderId: number, action: string): Promise<number>;
   dueRetries(env: string, now: Date): Promise<Order[]>;
   list(env: string, opts: { sinceHours: number; status?: OrderStatus[]; undelivered?: boolean }): Promise<Order[]>;
   log(entry: { orderId: number; action: string; by: string; reason?: string; detail?: Record<string, unknown> }): Promise<void>;
@@ -110,9 +117,28 @@ export function createPgOrderStore(sql: SQL): OrderStore {
     },
     async claimDelivery(id) {
       const rows = await sql`
-        UPDATE ebook_order SET delivered_at = now(), delivery_error = NULL, updated_at = now()
+        UPDATE ebook_order SET delivered_at = now(), delivery_error = NULL, next_attempt_at = NULL, updated_at = now()
         WHERE id = ${id} AND status = 'paid' AND delivered_at IS NULL RETURNING id`;
       return rows.length === 1;
+    },
+    async scheduleDelivery(id, at) {
+      await sql`UPDATE ebook_order SET next_attempt_at = ${at}, updated_at = now() WHERE id = ${id} AND status = 'paid' AND delivered_at IS NULL`;
+    },
+    async dueDeliveries(env, now) {
+      const rows = await sql`
+        SELECT * FROM ebook_order WHERE env = ${env} AND status = 'paid' AND delivered_at IS NULL AND next_attempt_at <= ${now}
+        ORDER BY next_attempt_at LIMIT 20`;
+      return rows.map(toOrder);
+    },
+    async markDelivered(id) {
+      const rows = await sql`
+        UPDATE ebook_order SET delivered_at = now(), next_attempt_at = NULL, updated_at = now()
+        WHERE id = ${id} AND status = 'paid' AND delivered_at IS NULL RETURNING id`;
+      return rows.length === 1;
+    },
+    async countLog(orderId, action) {
+      const rows = await sql`SELECT count(*)::int AS n FROM ebook_order_log WHERE order_id = ${orderId} AND action = ${action}`;
+      return Number(rows[0]?.n ?? 0);
     },
     async deliveryFailed(id, error) {
       await sql`UPDATE ebook_order SET delivered_at = NULL, delivery_error = ${error.slice(0, 500)}, updated_at = now() WHERE id = ${id}`;
@@ -183,7 +209,25 @@ export function createMemoryOrderStore(): OrderStore & { orders: Order[]; logs: 
       if (o.status !== "paid" || o.deliveredAt) return false;
       o.deliveredAt = new Date();
       o.deliveryError = null;
+      o.nextAttemptAt = null;
       return true;
+    },
+    async scheduleDelivery(id, at) {
+      const o = find(id)!;
+      if (o.status === "paid" && !o.deliveredAt) o.nextAttemptAt = at;
+    },
+    async dueDeliveries(env, now) {
+      return orders.filter((o) => o.env === env && o.status === "paid" && !o.deliveredAt && o.nextAttemptAt && o.nextAttemptAt <= now).map((o) => ({ ...o }));
+    },
+    async markDelivered(id) {
+      const o = find(id);
+      if (!o || o.status !== "paid" || o.deliveredAt) return false;
+      o.deliveredAt = new Date();
+      o.nextAttemptAt = null;
+      return true;
+    },
+    async countLog(orderId, action) {
+      return logs.filter((l) => l.orderId === orderId && l.action === action).length;
     },
     async deliveryFailed(id, error) {
       const o = find(id)!;

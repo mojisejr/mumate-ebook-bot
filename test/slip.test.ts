@@ -5,6 +5,7 @@ import { loadConfig, type SlipConfig } from "../src/config.ts";
 import type { ManyChat, Sent } from "../src/manychat.ts";
 import { createProcessor, MAX_ATTEMPTS, reasonText, repeatText } from "../src/orders.ts";
 import { createMemoryOrderStore } from "../src/orders-store.ts";
+import { COLOR_SOLD, COLOR_STUCK, createNotifier, type Card, type Notifier } from "../src/notify.ts";
 import { classify, createSlip2Go, type Slip2Go, type Verdict } from "../src/slip2go.ts";
 import { createMemoryStore } from "../src/store.ts";
 
@@ -44,6 +45,7 @@ function fakeManyChat(fail: Partial<Record<keyof ManyChat, boolean>> = {}) {
     async sendFlow(_id, ns) { return reply("sendFlow", `flow:${ns}`); },
     async addTag(_id, tag) { return reply("addTag", `tag:${tag}`); },
     async setField(_id, name, value) { return reply("setField", `field:${name}=${value}`); },
+    async contactInfo() { return { name: "คุณทดสอบ", chatUrl: "https://app.manychat.com/fb1/chat/1234567890" }; },
   };
   return mc;
 }
@@ -53,7 +55,9 @@ function harness(opts: { slip2go?: Slip2Go & { calls: number }; mc?: ReturnType<
   const mc = opts.mc ?? fakeManyChat();
   const slip2go = opts.slip2go ?? answers();
   const logs: Record<string, unknown>[] = [];
-  const processor = createProcessor({ env: "staging", slip: SLIP, slip2go, manychat: mc, orders, now: opts.now, log: (e) => void logs.push(e) });
+  const cards: Card[] = [];
+  const notifier: Notifier = { async post(c) { cards.push(c); } };
+  const processor = createProcessor({ env: "staging", slip: SLIP, slip2go, manychat: mc, orders, notifier, now: opts.now, log: (e) => void logs.push(e) });
   const store = createMemoryStore();
   const pending: Promise<unknown>[] = [];
   const app = createApp({
@@ -72,7 +76,7 @@ function harness(opts: { slip2go?: Slip2Go & { calls: number }; mc?: ReturnType<
   };
   const deliveries = () => mc.calls.filter((c) => c === `flow:${SLIP.flowDeliver}`).length;
   const notices = () => mc.calls.filter((c) => c === `flow:${SLIP.flowNotice}`).length;
-  return { orders, mc, slip2go, processor, store, send, deliveries, notices, logs };
+  return { orders, mc, slip2go, processor, store, send, deliveries, notices, logs, cards };
 }
 
 describe("slip endpoint", () => {
@@ -325,5 +329,100 @@ describe("slip config", () => {
     expect(() => loadConfig({ ...base, ...slip, EBOOK_PRICE: "95.-" })).toThrow("EBOOK_PRICE");
     expect(() => loadConfig({ ...base, ...slip, EBOOK_RECEIVER_ACCOUNT_NUMBER: "200-8-20487-2" })).toThrow("digits");
     expect(() => loadConfig({ ...base, ...slip, EBOOK_FLOW_DELIVER: "my flow" })).toThrow("flow ns");
+  });
+});
+
+describe("delivery retries and the team's Discord cards", () => {
+  test("a delivered sale posts one green card with the chat link; a resend to someone who had it posts none", async () => {
+    const h = harness();
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    expect(h.cards).toHaveLength(1);
+    expect(h.cards[0]).toMatchObject({ color: COLOR_SOLD, url: "https://app.manychat.com/fb1/chat/1234567890" });
+    expect(h.cards[0]!.title).toContain("คุณทดสอบ");
+    expect(await h.processor.resend(1, "owner", "lost the message", false)).toMatchObject({ ok: true });
+    expect(h.cards).toHaveLength(1);
+  });
+
+  test("a refused delivery is tried again at 1, 5 and 30 minutes, then the team gets one red card and the tries stop", async () => {
+    let t = new Date("2026-11-11T02:00:00Z").getTime();
+    const mc = fakeManyChat({ sendFlow: true });
+    const h = harness({ mc, now: () => new Date(t) });
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    expect(h.deliveries()).toBe(1);
+    expect(h.orders.orders[0]!.nextAttemptAt?.getTime()).toBe(t + 60_000);
+    expect(await h.processor.retryDeliveries()).toBe(0); // not due yet
+    for (const wait of [60_000, 5 * 60_000, 30 * 60_000]) {
+      t += wait;
+      expect(await h.processor.retryDeliveries()).toBe(1);
+    }
+    expect(h.deliveries()).toBe(4);
+    expect(h.orders.orders[0]).toMatchObject({ status: "paid", deliveredAt: null, nextAttemptAt: null });
+    expect(h.cards).toHaveLength(1);
+    expect(h.cards[0]).toMatchObject({ color: COLOR_STUCK, url: "https://app.manychat.com/fb1/chat/1234567890" });
+    expect(h.cards[0]!.fields.find((f) => f.name === "บอทลองส่งแล้ว")?.value).toBe("4 ครั้ง");
+    expect(h.cards[0]!.footer).toContain("mark-delivered 1");
+    t += 24 * 3600_000;
+    expect(await h.processor.retryDeliveries()).toBe(0);
+    expect(h.deliveries()).toBe(4);
+  });
+
+  test("a retry that goes through delivers once and posts the green card", async () => {
+    let t = Date.now();
+    const mc = fakeManyChat({ sendFlow: true });
+    const h = harness({ mc, now: () => new Date(t) });
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    (mc as { sendFlow: ManyChat["sendFlow"] }).sendFlow = async (_id, ns) => { mc.calls.push(`flow:${ns}`); return { ok: true }; };
+    t += 60_000;
+    expect(await h.processor.retryDeliveries()).toBe(1);
+    expect(h.orders.orders[0]!.deliveredAt).not.toBeNull();
+    expect(h.cards.map((c) => c.color)).toEqual([COLOR_SOLD]);
+    t += 3600_000;
+    expect(await h.processor.retryDeliveries()).toBe(0);
+  });
+
+  test("mark-delivered closes a paid order the team sent by hand and stops the tries; dry run changes nothing", async () => {
+    let t = Date.now();
+    const h = harness({ mc: fakeManyChat({ sendFlow: true }), now: () => new Date(t) });
+    await h.send({ subscriber_id: TESTER, image_url: IMG });
+    expect(await h.processor.markDelivered(1, "admin", "sent in chat", true)).toMatchObject({ ok: true });
+    expect(h.orders.orders[0]!.deliveredAt).toBeNull();
+    expect(await h.processor.markDelivered(1, "admin", "sent in chat", false)).toEqual({ ok: true, detail: "marked delivered" });
+    expect(h.orders.orders[0]).toMatchObject({ nextAttemptAt: null });
+    expect(h.orders.orders[0]!.deliveredAt).not.toBeNull();
+    expect(h.orders.logs.find((l) => l.action === "mark_delivered")).toMatchObject({ by: "admin", reason: "sent in chat" });
+    t += 60_000;
+    expect(await h.processor.retryDeliveries()).toBe(0);
+    expect(await h.processor.markDelivered(1, "admin", "again", false)).toMatchObject({ ok: false });
+  });
+
+  test("a manual resend that fails is not rescheduled and posts no card (the admin is already on it)", async () => {
+    const h2 = harness({ mc: fakeManyChat({ sendFlow: true }) });
+    await h2.send({ subscriber_id: TESTER, image_url: IMG });
+    await h2.orders.scheduleDelivery(1, null);
+    expect(await h2.processor.resend(1, "owner", "try", false)).toMatchObject({ ok: false });
+    expect(h2.orders.orders[0]!.nextAttemptAt).toBeNull();
+    expect(h2.cards).toHaveLength(0);
+  });
+
+  test("the notifier posts an embed to the webhook, skips when none is set, and never throws", async () => {
+    const posted: { url: string; body: string }[] = [];
+    const ok = createNotifier({ webhook: "https://discord.com/api/webhooks/1/abc", fetch: async (url, init) => {
+      posted.push({ url, body: String(init?.body) }); return new Response("", { status: 204 }); }, log: () => {} });
+    await ok.post({ title: "t", color: COLOR_SOLD, fields: [{ name: "a", value: "b" }] });
+    expect(posted).toHaveLength(1);
+    expect(JSON.parse(posted[0]!.body)).toMatchObject({ embeds: [{ title: "t", color: COLOR_SOLD }], allowed_mentions: { parse: [] } });
+    const none = createNotifier({ webhook: null, fetch: async () => { throw new Error("must not be called"); } });
+    await none.post({ title: "t", color: 1, fields: [] });
+    const logs: unknown[] = [];
+    const broken = createNotifier({ webhook: "https://discord.com/api/webhooks/1/abc", fetch: async () => { throw new Error("down"); }, log: (e) => void logs.push(e) });
+    await broken.post({ title: "t", color: 1, fields: [] });
+    expect(logs).toHaveLength(1);
+  });
+
+  test("EBOOK_DISCORD_WEBHOOK must be a Discord webhook URL when set", () => {
+    const base = { MUMATE_ENV: "staging", EBOOK_HOOK_SECRET: SECRET, EBOOK_DATABASE_URL: "postgres://x", MANYCHAT_API_KEY: "k" };
+    expect(loadConfig(base).discordWebhook).toBeNull();
+    expect(loadConfig({ ...base, EBOOK_DISCORD_WEBHOOK: "https://discord.com/api/webhooks/123/ab-C_d" }).discordWebhook).toContain("/123/");
+    expect(() => loadConfig({ ...base, EBOOK_DISCORD_WEBHOOK: "https://evil.example/hook" })).toThrow();
   });
 });
