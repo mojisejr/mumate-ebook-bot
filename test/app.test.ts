@@ -137,6 +137,29 @@ describe("manychat client", () => {
     expect((calls[0]?.init?.headers as Record<string, string>).Authorization).toBe("Bearer KEY");
     expect(JSON.parse(String(calls[0]?.init?.body))).toMatchObject({ subscriber_id: 1234567890 });
   });
+  test("writes a 17-digit subscriber id digit for digit, never rounded through Number", async () => {
+    const big = "25021534494149752"; // Number(big) is 25021534494149750, a contact that does not exist
+    const bodies: string[] = [];
+    const mc = createManyChat({ apiKey: "K", apiBase: "https://mc.test",
+      fetch: async (_url, init) => { bodies.push(String(init?.body)); return new Response('{"status":"success"}'); } });
+    await mc.sendText(big, "hi");
+    await mc.sendFlow(big, "content1");
+    await mc.addTag(big, "bot_paid");
+    await mc.setField(big, "bot_notice", "x");
+    expect(bodies).toHaveLength(4);
+    for (const b of bodies) {
+      expect(b.startsWith(`{"subscriber_id":${big},`)).toBe(true);
+      expect(() => JSON.parse(b)).not.toThrow();
+    }
+    expect(JSON.parse(bodies[1]!)).toMatchObject({ flow_ns: "content1" });
+  });
+  test("refuses a subscriber id that is not digits without calling ManyChat", async () => {
+    let called = 0;
+    const mc = createManyChat({ apiKey: "K", apiBase: "https://mc.test",
+      fetch: async () => { called++; return new Response('{"status":"success"}'); } });
+    expect((await mc.sendFlow('1,"x":2', "content1")).ok).toBe(false);
+    expect(called).toBe(0);
+  });
   test("turns an error answer or a network failure into ok:false", async () => {
     const bad = createManyChat({ apiKey: "K", apiBase: "https://mc.test",
       fetch: async () => new Response('{"status":"error","message":"window"}', { status: 400 }) });

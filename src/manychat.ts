@@ -17,12 +17,15 @@ export interface ManyChat {
 
 export function createManyChat(opts: { apiKey: string; apiBase: string; fetch?: Fetch; timeoutMs?: number }): ManyChat {
   const doFetch = opts.fetch ?? fetch;
-  async function post(path: string, body: Record<string, unknown>): Promise<Sent> {
+  // ManyChat ids are 17 digits, above Number.MAX_SAFE_INTEGER: Number(id) rounds some of them to an id that does not
+  // exist ("Subscriber does not exist", 5 of 9 production orders on 2026-11-11). The digits go into the JSON as written.
+  async function post(path: string, id: string, rest: Record<string, unknown>): Promise<Sent> {
+    if (!/^\d{1,20}$/.test(id)) return { ok: false, detail: `${path} subscriber id not digits` };
     try {
       const res = await doFetch(`${opts.apiBase}${path}`, {
         method: "POST",
         headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: `{"subscriber_id":${id},${JSON.stringify(rest).slice(1)}`,
         signal: AbortSignal.timeout(opts.timeoutMs ?? 8000),
       });
       const text = await res.text();
@@ -50,13 +53,12 @@ export function createManyChat(opts: { apiKey: string; apiBase: string; fetch?: 
   return {
     contactInfo,
     sendText: (id, text) =>
-      post("/fb/sending/sendContent", {
-        subscriber_id: Number(id),
+      post("/fb/sending/sendContent", id, {
         data: { version: "v2", content: { messages: [{ type: "text", text }] } },
       }),
-    sendFlow: (id, flowNs) => post("/fb/sending/sendFlow", { subscriber_id: Number(id), flow_ns: flowNs }),
-    addTag: (id, tagName) => post("/fb/subscriber/addTagByName", { subscriber_id: Number(id), tag_name: tagName }),
+    sendFlow: (id, flowNs) => post("/fb/sending/sendFlow", id, { flow_ns: flowNs }),
+    addTag: (id, tagName) => post("/fb/subscriber/addTagByName", id, { tag_name: tagName }),
     setField: (id, fieldName, value) =>
-      post("/fb/subscriber/setCustomFieldByName", { subscriber_id: Number(id), field_name: fieldName, field_value: value }),
+      post("/fb/subscriber/setCustomFieldByName", id, { field_name: fieldName, field_value: value }),
   };
 }
