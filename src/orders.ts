@@ -8,10 +8,14 @@
 // The delivery flow in ManyChat holds the same message the team sends by hand (E-Book link, the app coupon, the how-to
 // image), so the team edits that text in ManyChat without touching this app. Delivery is claimed with one conditional
 // UPDATE, so a repeated request, a retry tick and an admin's resend can never send it twice.
+//
+// A delivery ManyChat refuses is tried again by the minute tick (1, 5 and 30 min after each failure); after the last
+// try the team's Discord room gets a red card with a link to the chat. Every delivered sale gets a green card.
 
 import { createHash } from "node:crypto";
 import type { SlipConfig } from "./config.ts";
 import type { ManyChat } from "./manychat.ts";
+import { silentNotifier, soldCard, stuckCard, type Notifier } from "./notify.ts";
 import type { Order, OrderStore } from "./orders-store.ts";
 import type { RejectReason, Slip2Go, Verdict } from "./slip2go.ts";
 
@@ -60,6 +64,9 @@ function isRejectReason(r: string): r is RejectReason {
   return (REJECT_REASONS as readonly string[]).includes(r);
 }
 
+/** waits before the automatic delivery tries 2, 3 and 4; after the 4th failure the order goes to the team */
+export const DELIVERY_RETRY_MS = [60_000, 5 * 60_000, 30 * 60_000] as const;
+
 export function retryDelayMs(attempt: number): number {
   // 1, 2, 4, 8 minutes after attempts 1-4; the fifth failure goes to the admin
   return 60_000 * 2 ** Math.max(0, attempt - 1);
@@ -71,6 +78,7 @@ export interface ProcessorDeps {
   slip2go: Slip2Go;
   manychat: ManyChat;
   orders: OrderStore;
+  notifier?: Notifier;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -81,6 +89,15 @@ export function createProcessor(d: ProcessorDeps) {
   const now = d.now ?? (() => new Date());
   const log = d.log ?? ((entry) => console.log(JSON.stringify(entry)));
   const SYSTEM = "bot";
+  const notifier = d.notifier ?? silentNotifier;
+
+  async function card(order: Order, kind: "sold" | "stuck", extra: { tries?: number; error?: string } = {}): Promise<void> {
+    const who = await d.manychat.contactInfo(order.subscriberId);
+    const base = { id: order.id, amount: order.amount, name: who.name, chatUrl: who.chatUrl };
+    await notifier.post(kind === "sold"
+      ? soldCard({ ...base, at: now() })
+      : stuckCard({ ...base, tries: extra.tries ?? 0, error: extra.error ?? "" }));
+  }
 
   async function notice(order: Order, kind: "rejected" | "admin", text: string): Promise<void> {
     const tag = kind === "rejected" ? TAG_REJECTED : TAG_ADMIN;
@@ -95,7 +112,9 @@ export function createProcessor(d: ProcessorDeps) {
     if (failed.length) log({ msg: "notice_failed", order: order.id, env: d.env, errors: failed });
   }
 
-  async function deliver(orderId: number, by: string): Promise<AdminResult> {
+  // auto = the bot's own try (first send or a retry tick): failures are scheduled again, then sent to the team.
+  // sale = post the green card on success (false when an admin resends to a customer who already had it).
+  async function deliver(orderId: number, by: string, opts: { auto: boolean; sale: boolean }): Promise<AdminResult> {
     if (!(await d.orders.claimDelivery(orderId))) return { ok: false, detail: "not paid, or already delivered" };
     const order = (await d.orders.get(orderId))!;
     const tag = await d.manychat.addTag(order.subscriberId, TAG_PAID);
@@ -105,10 +124,23 @@ export function createProcessor(d: ProcessorDeps) {
       await d.orders.deliveryFailed(orderId, sent.detail);
       await d.orders.log({ orderId, action: "delivery_failed", by, detail: { error: sent.detail } });
       log({ msg: "delivery_failed", order: orderId, env: d.env, error: sent.detail });
+      if (opts.auto) {
+        const tries = await d.orders.countLog(orderId, "delivery_failed");
+        const wait = DELIVERY_RETRY_MS[tries - 1];
+        if (wait !== undefined) {
+          await d.orders.scheduleDelivery(orderId, new Date(now().getTime() + wait));
+        } else {
+          await d.orders.scheduleDelivery(orderId, null);
+          await d.orders.log({ orderId, action: "delivery_gave_up", by, detail: { tries } });
+          log({ msg: "alert", what: "paid but not delivered", order: orderId, env: d.env, tries });
+          await card(order, "stuck", { tries, error: sent.detail });
+        }
+      }
       return { ok: false, detail: sent.detail };
     }
     await d.orders.log({ orderId, action: "delivered", by });
     log({ msg: "delivered", order: orderId, env: d.env });
+    if (opts.sale) await card(order, "sold");
     return { ok: true, detail: "delivered" };
   }
 
@@ -126,7 +158,7 @@ export function createProcessor(d: ProcessorDeps) {
       await d.orders.setResult(order.id, {
         status: "paid", slipCode: v.code, amount: v.slip.amount, slipAt: v.slip.dateTime, senderName: v.slip.senderName,
       });
-      await deliver(order.id, SYSTEM);
+      await deliver(order.id, SYSTEM, { auto: true, sale: true });
       return;
     }
     if (v.kind === "reject") {
@@ -180,6 +212,25 @@ export function createProcessor(d: ProcessorDeps) {
       return due.length;
     },
 
+    // Paid orders whose delivery ManyChat refused: try again when due (same minute tick as the slip retries).
+    async retryDeliveries(): Promise<number> {
+      const due = await d.orders.dueDeliveries(d.env, now());
+      for (const order of due) await deliver(order.id, SYSTEM, { auto: true, sale: true });
+      return due.length;
+    },
+
+    // An admin sent the E-Book by hand: close the order so it stops showing as not delivered and the bot stops trying.
+    async markDelivered(orderId: number, by: string, reason: string, dryRun: boolean): Promise<AdminResult> {
+      const order = await d.orders.get(orderId);
+      if (!order) return { ok: false, detail: `no order ${orderId}` };
+      if (order.status !== "paid") return { ok: false, detail: `order is ${order.status}, not paid` };
+      if (order.deliveredAt) return { ok: false, detail: "already delivered" };
+      if (dryRun) return { ok: true, detail: `would mark order ${orderId} delivered by hand` };
+      if (!(await d.orders.markDelivered(orderId))) return { ok: false, detail: "not paid, or already delivered" };
+      await d.orders.log({ orderId, action: "mark_delivered", by, reason });
+      return { ok: true, detail: "marked delivered" };
+    },
+
     // An admin confirmed the money by hand (for example a slip Slip2Go could not find). Records who and why, then delivers.
     async markPaid(orderId: number, by: string, reason: string, dryRun: boolean): Promise<AdminResult> {
       const order = await d.orders.get(orderId);
@@ -188,7 +239,7 @@ export function createProcessor(d: ProcessorDeps) {
       if (dryRun) return { ok: true, detail: `would mark order ${orderId} (${order.status}) paid and deliver` };
       await d.orders.setResult(orderId, { status: "paid", slipCode: order.slipCode, reason: `marked paid: ${reason}` });
       await d.orders.log({ orderId, action: "mark_paid", by, reason });
-      return deliver(orderId, by);
+      return deliver(orderId, by, { auto: false, sale: true });
     },
 
     // Send the delivery flow again for a paid order (the first send failed, or the customer lost the message).
@@ -198,8 +249,9 @@ export function createProcessor(d: ProcessorDeps) {
       if (order.status !== "paid") return { ok: false, detail: `order is ${order.status}, not paid` };
       if (dryRun) return { ok: true, detail: `would send the delivery flow again for order ${orderId}` };
       await d.orders.log({ orderId, action: "resend", by, reason });
-      if (order.deliveredAt) await d.orders.deliveryFailed(orderId, `resend requested: ${reason}`);
-      return deliver(orderId, by);
+      const hadIt = !!order.deliveredAt;
+      if (hadIt) await d.orders.deliveryFailed(orderId, `resend requested: ${reason}`);
+      return deliver(orderId, by, { auto: false, sale: !hadIt });
     },
   };
 }

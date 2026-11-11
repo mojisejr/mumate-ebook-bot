@@ -5,11 +5,13 @@
 //   pending [--hours N]                        orders that still need someone: retry, admin, rejected, paid-not-delivered
 //   resend    <order-id> --by W --reason "…" [--dry-run]   send the delivery flow again to a paid order
 //   mark-paid <order-id> --by W --reason "…" [--dry-run]   an admin confirmed the money: mark paid and deliver
+//   mark-delivered <order-id> --by W --reason "…" [--dry-run]   an admin sent the E-Book by hand: close the order
 //
 // Output is pipe-separated lines. It never prints a subscriber id, an image link or a slip's sender name.
 
 import { loadConfig } from "./config.ts";
 import { createManyChat } from "./manychat.ts";
+import { createNotifier } from "./notify.ts";
 import { createProcessor } from "./orders.ts";
 import { createPgOrderStore, type Order } from "./orders-store.ts";
 import { createSlip2Go } from "./slip2go.ts";
@@ -54,21 +56,24 @@ async function main(): Promise<number> {
       for (const o of list) console.log(orderLine(o));
       return 0;
     }
-    if (args.cmd === "resend" || args.cmd === "mark-paid") {
+    if (args.cmd === "resend" || args.cmd === "mark-paid" || args.cmd === "mark-delivered") {
       if (!config.slip) return fail("slip check is not configured on this host");
       if (!args.id) return fail(`${args.cmd} needs an order id`);
       if (!args.by || !args.reason?.trim()) return fail(`${args.cmd} needs --by and --reason`);
       const processor = createProcessor({
         env: config.env, slip: config.slip, slip2go: createSlip2Go(config.slip), orders,
         manychat: createManyChat({ apiKey: config.manychatApiKey, apiBase: config.manychatApiBase }), log: () => {},
+        notifier: createNotifier({ webhook: config.discordWebhook, log: () => {} }),
       });
       const r = args.cmd === "resend"
         ? await processor.resend(args.id, args.by, args.reason, args.dryRun)
-        : await processor.markPaid(args.id, args.by, args.reason, args.dryRun);
+        : args.cmd === "mark-paid"
+          ? await processor.markPaid(args.id, args.by, args.reason, args.dryRun)
+          : await processor.markDelivered(args.id, args.by, args.reason, args.dryRun);
       console.log(`${args.dryRun ? "dry-run" : "result"}|${r.ok ? "ok" : "failed"}|${r.detail}`);
       return r.ok ? 0 : 1;
     }
-    return fail("usage: orders|pending [--hours N] · resend|mark-paid <id> --by W --reason \"…\" [--dry-run]", 2);
+    return fail("usage: orders|pending [--hours N] · resend|mark-paid|mark-delivered <id> --by W --reason \"…\" [--dry-run]", 2);
   } finally {
     await sql.close();
   }

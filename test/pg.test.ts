@@ -43,6 +43,20 @@ describe.skipIf(!local)("postgres order store", () => {
       await orders.deliveryFailed(a.order.id, "sendFlow failed");
       expect(await orders.claimDelivery(a.order.id)).toBe(true); // a failed send can be claimed again by resend
 
+      // delivery retries: a refused send is scheduled, comes due, and a hand-sent order closes once
+      await orders.deliveryFailed(a.order.id, "sendFlow failed");
+      await orders.scheduleDelivery(a.order.id, new Date(Date.now() - 1000));
+      expect((await orders.dueDeliveries(env, new Date())).map((o) => o.id)).toContain(a.order.id);
+      await orders.log({ orderId: a.order.id, action: "delivery_failed", by: "test" });
+      await orders.log({ orderId: a.order.id, action: "delivery_failed", by: "test" });
+      expect(await orders.countLog(a.order.id, "delivery_failed")).toBe(2);
+      expect(await orders.markDelivered(a.order.id)).toBe(true);
+      expect(await orders.markDelivered(a.order.id)).toBe(false);
+      expect((await orders.get(a.order.id))).toMatchObject({ nextAttemptAt: null });
+      expect((await orders.dueDeliveries(env, new Date())).map((o) => o.id)).not.toContain(a.order.id);
+      await orders.deliveryFailed(a.order.id, "resend requested: test");
+      expect(await orders.claimDelivery(a.order.id)).toBe(true);
+
       const due = new Date(Date.now() - 1000);
       await orders.setResult(b.order.id, { status: "retry", slipCode: "200502", reason: "bank", attempts: 1, nextAttemptAt: due });
       expect((await orders.dueRetries(env, new Date())).map((o) => o.id)).toContain(b.order.id);

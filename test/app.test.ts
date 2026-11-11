@@ -20,6 +20,7 @@ function harness(opts: { open?: boolean; sendOk?: boolean } = {}) {
     async sendFlow() { return { ok: true }; },
     async addTag() { return { ok: true }; },
     async setField() { return { ok: true }; },
+    async contactInfo() { return { name: null, chatUrl: null }; },
   };
   const pending: Promise<unknown>[] = [];
   const app = createApp({

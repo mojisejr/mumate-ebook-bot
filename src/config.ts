@@ -18,6 +18,8 @@ export interface Config {
   // Slice 2. Absent until every value is set: the app still answers the slice 1 hook, and the slip endpoint says
   // "not configured" instead of guessing a price or a receiver.
   slip: SlipConfig | null;
+  /** the team's E-Book room in Discord (sale and "paid but not delivered" cards); null = post nothing */
+  discordWebhook: string | null;
 }
 
 export interface SlipConfig {
@@ -65,6 +67,15 @@ function loadSlip(env: Record<string, string | undefined>): SlipConfig | null {
   };
 }
 
+function loadWebhook(raw: string | undefined): string | null {
+  const v = raw?.trim();
+  if (!v) return null;
+  if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\/\d+\/[\w-]+$/.test(v)) {
+    throw new Error("EBOOK_DISCORD_WEBHOOK must be a Discord webhook URL (https://discord.com/api/webhooks/…)");
+  }
+  return v;
+}
+
 function required(env: Record<string, string | undefined>, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new Error(`${name} is required (see .env.example)`);
@@ -93,6 +104,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     open,
     gitSha: env.GIT_SHA?.trim() || "unknown",
     slip: loadSlip(env),
+    discordWebhook: loadWebhook(env.EBOOK_DISCORD_WEBHOOK),
   };
 }
 

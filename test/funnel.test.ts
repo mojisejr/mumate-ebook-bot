@@ -16,6 +16,7 @@ function harness(opts: { funnel?: boolean } = {}) {
     async sendFlow(id) { sent.push(id); return { ok: true }; },
     async addTag() { return { ok: true }; },
     async setField() { return { ok: true }; },
+    async contactInfo() { return { name: null, chatUrl: null }; },
   };
   const pending: Promise<unknown>[] = [];
   const logs: Record<string, unknown>[] = [];

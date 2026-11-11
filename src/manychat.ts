@@ -4,12 +4,15 @@
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 export type Sent = { ok: true } | { ok: false; detail: string };
+/** who the contact is, for the team's Discord card: display name and the Live Chat link (null when ManyChat does not answer) */
+export type ContactInfo = { name: string | null; chatUrl: string | null };
 
 export interface ManyChat {
   sendText(subscriberId: string, text: string): Promise<Sent>;
   sendFlow(subscriberId: string, flowNs: string): Promise<Sent>;
   addTag(subscriberId: string, tagName: string): Promise<Sent>;
   setField(subscriberId: string, fieldName: string, value: string): Promise<Sent>;
+  contactInfo(subscriberId: string): Promise<ContactInfo>;
 }
 
 export function createManyChat(opts: { apiKey: string; apiBase: string; fetch?: Fetch; timeoutMs?: number }): ManyChat {
@@ -30,7 +33,22 @@ export function createManyChat(opts: { apiKey: string; apiBase: string; fetch?: 
       return { ok: false, detail: `${path} ${error instanceof Error ? error.message : String(error)}` };
     }
   }
+  async function contactInfo(id: string): Promise<ContactInfo> {
+    try {
+      const res = await doFetch(`${opts.apiBase}/fb/subscriber/getInfo?subscriber_id=${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${opts.apiKey}` },
+        signal: AbortSignal.timeout(opts.timeoutMs ?? 8000),
+      });
+      const j = (await res.json().catch(() => null)) as { data?: { name?: unknown; live_chat_url?: unknown } } | null;
+      const name = typeof j?.data?.name === "string" && j.data.name.trim() ? j.data.name.trim().slice(0, 80) : null;
+      const url = typeof j?.data?.live_chat_url === "string" && /^https:\/\/app\.manychat\.com\/[\w/?=&.-]+$/.test(j.data.live_chat_url) ? j.data.live_chat_url : null;
+      return { name, chatUrl: url };
+    } catch {
+      return { name: null, chatUrl: null };
+    }
+  }
   return {
+    contactInfo,
     sendText: (id, text) =>
       post("/fb/sending/sendContent", {
         subscriber_id: Number(id),
