@@ -11,7 +11,8 @@
 //
 // A delivery ManyChat refuses posts a red card to the team's Discord room at once, with a link to the chat (owner
 // 2026-11-11: 4 of the first 7 refusals never went through, so the team must not wait), and the minute tick still
-// tries again 1, 5 and 30 min after each failure. Every delivered sale gets a green card.
+// tries again 3 and then 5 min later (owner 2026-11-11: beyond that the admin sends it). Every delivered sale gets a
+// green card.
 
 import { createHash } from "node:crypto";
 import type { SlipConfig } from "./config.ts";
@@ -65,8 +66,8 @@ function isRejectReason(r: string): r is RejectReason {
   return (REJECT_REASONS as readonly string[]).includes(r);
 }
 
-/** waits before the automatic delivery tries 2, 3 and 4; after the 4th failure the order goes to the team */
-export const DELIVERY_RETRY_MS = [60_000, 5 * 60_000, 30 * 60_000] as const;
+/** waits before the automatic delivery tries 2 and 3; after the 3rd failure the bot stops and the admin sends it */
+export const DELIVERY_RETRY_MS = [3 * 60_000, 5 * 60_000] as const;
 
 export function retryDelayMs(attempt: number): number {
   // 1, 2, 4, 8 minutes after attempts 1-4; the fifth failure goes to the admin
