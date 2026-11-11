@@ -62,7 +62,7 @@ export function soldCard(o: { id: number; amount: number | null; name: string | 
   };
 }
 
-export function stuckCard(o: { id: number; amount: number | null; name: string | null; chatUrl: string | null; tries: number; error: string }): Card {
+export function stuckCard(o: { id: number; amount: number | null; name: string | null; chatUrl: string | null; retrying: boolean; error: string }): Card {
   return {
     title: `⚠️ จ่ายแล้วแต่ยังไม่ได้ของ · ${o.name ?? "ลูกค้า"}`,
     color: COLOR_STUCK,
@@ -70,8 +70,8 @@ export function stuckCard(o: { id: number; amount: number | null; name: string |
     fields: [
       { name: "ยอด", value: o.amount === null ? "-" : `${o.amount} บาท` },
       { name: "ออเดอร์", value: `#${o.id}` },
-      { name: "บอทลองส่งแล้ว", value: `${o.tries} ครั้ง` },
-      { name: "ต้องทำ", value: "ส่งลิงก์ E-Book + โค้ดให้ลูกค้าในแชท แล้วแจ้งให้ปิดออเดอร์นี้", inline: false },
+      { name: "ต้องทำ", value: "ส่งลิงก์ E-Book + โค้ดให้ลูกค้าในแชทเลย แล้วแจ้งให้ปิดออเดอร์นี้", inline: false },
+      ...(o.retrying ? [{ name: "หมายเหตุ", value: "บอทยังลองส่งเองต่ออีก 3 ครั้งใน 36 นาที ถ้าส่งได้จะมีการ์ดเขียว ลูกค้าอาจได้ลิงก์ 2 ครั้ง ไม่เป็นไร", inline: false }] : []),
       ...(o.chatUrl ? [{ name: "เปิดแชท", value: `[เปิดแชทลูกค้าใน ManyChat](${o.chatUrl})`, inline: false }] : []),
       { name: "สาเหตุจาก ManyChat", value: o.error.replace(/^\/\S+\s*/, "").slice(0, 200), inline: false },
     ],

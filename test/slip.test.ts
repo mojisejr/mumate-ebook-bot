@@ -343,12 +343,16 @@ describe("delivery retries and the team's Discord cards", () => {
     expect(h.cards).toHaveLength(1);
   });
 
-  test("a refused delivery is tried again at 1, 5 and 30 minutes, then the team gets one red card and the tries stop", async () => {
+  test("a refused delivery posts one red card at once, is tried again at 1, 5 and 30 minutes, then stops", async () => {
     let t = new Date("2026-11-11T02:00:00Z").getTime();
     const mc = fakeManyChat({ sendFlow: true });
     const h = harness({ mc, now: () => new Date(t) });
     await h.send({ subscriber_id: TESTER, image_url: IMG });
     expect(h.deliveries()).toBe(1);
+    expect(h.cards).toHaveLength(1);
+    expect(h.cards[0]).toMatchObject({ color: COLOR_STUCK, url: "https://app.manychat.com/fb1/chat/1234567890" });
+    expect(h.cards[0]!.fields.find((f) => f.name === "หมายเหตุ")?.value).toContain("36 นาที");
+    expect(h.cards[0]!.footer).toContain("mark-delivered 1");
     expect(h.orders.orders[0]!.nextAttemptAt?.getTime()).toBe(t + 60_000);
     expect(await h.processor.retryDeliveries()).toBe(0); // not due yet
     for (const wait of [60_000, 5 * 60_000, 30 * 60_000]) {
@@ -356,11 +360,9 @@ describe("delivery retries and the team's Discord cards", () => {
       expect(await h.processor.retryDeliveries()).toBe(1);
     }
     expect(h.deliveries()).toBe(4);
+    expect(h.cards).toHaveLength(1); // no second red card
     expect(h.orders.orders[0]).toMatchObject({ status: "paid", deliveredAt: null, nextAttemptAt: null });
-    expect(h.cards).toHaveLength(1);
-    expect(h.cards[0]).toMatchObject({ color: COLOR_STUCK, url: "https://app.manychat.com/fb1/chat/1234567890" });
-    expect(h.cards[0]!.fields.find((f) => f.name === "บอทลองส่งแล้ว")?.value).toBe("4 ครั้ง");
-    expect(h.cards[0]!.footer).toContain("mark-delivered 1");
+    expect(h.orders.logs.some((l) => l.action === "delivery_gave_up")).toBe(true);
     t += 24 * 3600_000;
     expect(await h.processor.retryDeliveries()).toBe(0);
     expect(h.deliveries()).toBe(4);
@@ -375,7 +377,7 @@ describe("delivery retries and the team's Discord cards", () => {
     t += 60_000;
     expect(await h.processor.retryDeliveries()).toBe(1);
     expect(h.orders.orders[0]!.deliveredAt).not.toBeNull();
-    expect(h.cards.map((c) => c.color)).toEqual([COLOR_SOLD]);
+    expect(h.cards.map((c) => c.color)).toEqual([COLOR_STUCK, COLOR_SOLD]);
     t += 3600_000;
     expect(await h.processor.retryDeliveries()).toBe(0);
   });
@@ -395,13 +397,13 @@ describe("delivery retries and the team's Discord cards", () => {
     expect(await h.processor.markDelivered(1, "admin", "again", false)).toMatchObject({ ok: false });
   });
 
-  test("a manual resend that fails is not rescheduled and posts no card (the admin is already on it)", async () => {
+  test("a manual resend that fails is not rescheduled and posts no further card (the admin is already on it)", async () => {
     const h2 = harness({ mc: fakeManyChat({ sendFlow: true }) });
     await h2.send({ subscriber_id: TESTER, image_url: IMG });
     await h2.orders.scheduleDelivery(1, null);
     expect(await h2.processor.resend(1, "owner", "try", false)).toMatchObject({ ok: false });
     expect(h2.orders.orders[0]!.nextAttemptAt).toBeNull();
-    expect(h2.cards).toHaveLength(0);
+    expect(h2.cards).toHaveLength(1); // only the red card of the bot's own first try
   });
 
   test("the notifier posts an embed to the webhook, skips when none is set, and never throws", async () => {
