@@ -9,8 +9,9 @@
 // image), so the team edits that text in ManyChat without touching this app. Delivery is claimed with one conditional
 // UPDATE, so a repeated request, a retry tick and an admin's resend can never send it twice.
 //
-// A delivery ManyChat refuses is tried again by the minute tick (1, 5 and 30 min after each failure); after the last
-// try the team's Discord room gets a red card with a link to the chat. Every delivered sale gets a green card.
+// A delivery ManyChat refuses posts a red card to the team's Discord room at once, with a link to the chat (owner
+// 2026-11-11: 4 of the first 7 refusals never went through, so the team must not wait), and the minute tick still
+// tries again 1, 5 and 30 min after each failure. Every delivered sale gets a green card.
 
 import { createHash } from "node:crypto";
 import type { SlipConfig } from "./config.ts";
@@ -91,12 +92,12 @@ export function createProcessor(d: ProcessorDeps) {
   const SYSTEM = "bot";
   const notifier = d.notifier ?? silentNotifier;
 
-  async function card(order: Order, kind: "sold" | "stuck", extra: { tries?: number; error?: string } = {}): Promise<void> {
+  async function card(order: Order, kind: "sold" | "stuck", extra: { tries?: number; error?: string; retrying?: boolean } = {}): Promise<void> {
     const who = await d.manychat.contactInfo(order.subscriberId);
     const base = { id: order.id, amount: order.amount, name: who.name, chatUrl: who.chatUrl };
     await notifier.post(kind === "sold"
       ? soldCard({ ...base, at: now() })
-      : stuckCard({ ...base, tries: extra.tries ?? 0, error: extra.error ?? "" }));
+      : stuckCard({ ...base, retrying: extra.retrying ?? false, error: extra.error ?? "" }));
   }
 
   async function notice(order: Order, kind: "rejected" | "admin", text: string): Promise<void> {
@@ -127,13 +128,16 @@ export function createProcessor(d: ProcessorDeps) {
       if (opts.auto) {
         const tries = await d.orders.countLog(orderId, "delivery_failed");
         const wait = DELIVERY_RETRY_MS[tries - 1];
+        if (tries === 1) {
+          log({ msg: "alert", what: "paid but not delivered", order: orderId, env: d.env });
+          await card(order, "stuck", { tries, error: sent.detail, retrying: wait !== undefined });
+        }
         if (wait !== undefined) {
           await d.orders.scheduleDelivery(orderId, new Date(now().getTime() + wait));
         } else {
           await d.orders.scheduleDelivery(orderId, null);
           await d.orders.log({ orderId, action: "delivery_gave_up", by, detail: { tries } });
-          log({ msg: "alert", what: "paid but not delivered", order: orderId, env: d.env, tries });
-          await card(order, "stuck", { tries, error: sent.detail });
+          log({ msg: "delivery_gave_up", order: orderId, env: d.env, tries });
         }
       }
       return { ok: false, detail: sent.detail };
